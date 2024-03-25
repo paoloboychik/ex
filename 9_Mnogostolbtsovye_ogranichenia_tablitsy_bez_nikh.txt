@@ -1,0 +1,73 @@
+WITH cons AS (
+/*отсекаем ограничения типа CHECK типа NOT NULL*/
+    SELECT t1.table_name, constraint_name, t2.column_name, t1.constraint_type
+    FROM user_constraints t1 LEFT OUTER JOIN user_cons_columns t2 USING (constraint_name)
+    
+    MINUS 
+    
+    SELECT t1.table_name, constraint_name, t2.column_name, t1.constraint_type
+    FROM user_constraints t1 LEFT OUTER JOIN user_cons_columns t2 USING (constraint_name)
+    WHERE UPPER(constraint_type) = 'C' AND INSTR(UPPER(search_condition_vc), '.*IS NOT NULL') <> 0
+),
+/*считаем кол-во столбцов для каждого ограничения*/
+cols_number AS (
+    SELECT L.table_name, L.constraint_name, L.constraint_type, COUNT(R.column_name)+1 as col_number
+    FROM cons L LEFT OUTER JOIN cons  R
+    ON (L.constraint_name = R.constraint_name AND L.column_name < R.column_name)
+    GROUP BY L.table_name, L.constraint_name, L.constraint_type 
+    ORDER BY L.table_name, L.constraint_name
+),
+/*получаем многостолбцовые ограничения*/
+many_cols_cons AS (
+    SELECT table_name, constraint_name, constraint_type, col_number
+    FROM cols_number
+    WHERE col_number > 1
+    ORDER BY table_name, constraint_name
+),
+/*нумеруем ограничения внутри каждой таблицы*/
+cons_num AS (
+    SELECT L.table_name, L.constraint_name, L.constraint_type, L.col_number, COUNT(R.constraint_name)+1 as con_num
+    FROM many_cols_cons L LEFT OUTER JOIN many_cols_cons R
+    ON (L.table_name = R.table_name AND L.constraint_name < R.constraint_name)
+    GROUP BY L.table_name, L.constraint_name, L.constraint_type, L.col_number
+    ORDER BY L.table_name, L.constraint_name
+),
+/*считаем кол-во многостолбцовых ограничений для каждой таблицы*/
+cons_number AS (
+    SELECT L.table_name, COUNT(R.constraint_name)+1 as con_number
+    FROM many_cols_cons L LEFT OUTER JOIN many_cols_cons  R
+    ON (L.table_name = R.table_name AND L.constraint_name < R.constraint_name)
+    GROUP BY L.table_name
+    ORDER BY L.table_name
+),
+
+alltab AS (
+    SELECT table_name FROM user_tables
+    ORDER BY table_name
+),
+
+alltab_num AS (
+    SELECT ROWNUM as n, table_name
+    FROM alltab
+),
+
+finally AS (
+    SELECT t1.n, t1.table_name, t2.con_num, t2.constraint_name, t2.constraint_type, t2.col_number, t3.con_number
+    FROM alltab_num t1 LEFT OUTER JOIN cons_num t2 ON (t1.table_name = t2.table_name) LEFT OUTER JOIN cons_number t3 
+    ON (t1.table_name = t3.table_name)
+    ORDER BY t1.n, t1.table_name, t2.con_num
+)
+SELECT CASE WHEN con_num = 1 OR con_number IS NULL THEN TO_CHAR(n) ELSE ' ' END as "Номер таблицы",
+        CASE WHEN con_num = 1 OR con_number IS NULL THEN table_name ELSE ' ' END as "Таблица",
+        NVL(TO_CHAR(con_num), ' ') as "Номер ограничения",
+        NVL(constraint_name, 'Многостолбцовых ограничений нет') as "Имя ограничения",
+        CASE constraint_type WHEN 'U' THEN 'Ограничение UNIQUE'
+                            WHEN 'P' THEN 'Первичный ключ'
+                            WHEN 'C' THEN 'Ограничение типа CHECK'
+                            WHEN 'R' THEN 'Внешний ключ'
+                            ELSE ' ' END as "Тип ограничения",
+        NVL(TO_CHAR(col_number), ' ') as "Кол-во столбцов",
+        CASE WHEN con_num = 1 OR con_number IS NULL THEN NVL(TO_CHAR(con_number), '0') ELSE ' ' END as "Кол-во многост. огр."
+
+FROM finally;
+

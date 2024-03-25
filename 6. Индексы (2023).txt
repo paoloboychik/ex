@@ -1,0 +1,56 @@
+/*Индексы с аналитическими функциями*/
+WITH alltables AS (
+    SELECT  table_name, ROW_NUMBER() OVER(ORDER BY table_name) as tab_num
+    FROM (
+        SELECT DISTINCT table_name
+        FROM user_tables
+        ORDER BY table_name
+    )
+    
+),
+
+ind AS (
+    SELECT t1.table_name,
+    index_name, t1.uniqueness, t2.column_name,  
+    ROW_NUMBER() OVER(PARTITION BY t1.table_name, index_name ORDER BY t2.column_name) as col_num,
+    COUNT(column_name) OVER(PARTITION BY t1.table_name, index_name ORDER BY index_name) as col_number
+    FROM user_indexes t1 LEFT OUTER JOIN user_ind_columns t2 USING (index_name)
+    ORDER BY t1.table_name
+),
+ind_cols AS (
+    SELECT table_name, 
+    
+    ROW_NUMBER() OVER(PARTITION BY table_name ORDER BY index_name) as ind_num,
+    index_name, uniqueness,
+    LTRIM(SYS_CONNECT_BY_PATH(column_name, ', '), ', ') as cols,
+    col_number
+    FROM ind
+    WHERE CONNECT_BY_ISLEAF = 1
+    START WITH col_num = 1
+    CONNECT BY PRIOR col_num = col_num - 1
+    AND PRIOR table_name = table_name   AND PRIOR index_name = index_name
+    ORDER BY table_name, ind_num
+), 
+res AS (
+SELECT CASE WHEN t2.ind_num = 1 OR t2.ind_num IS NULL THEN TO_CHAR(t1.tab_num) ELSE ' ' END as "Номер таблицы",
+CASE WHEN t2.ind_num = 1 OR t2.ind_num IS NULL THEN t1.table_name ELSE ' ' END as "Имя таблицы",
+CASE WHEN t2.ind_num IS NULL THEN ' ' ELSE TO_CHAR(t2.ind_num) END as  "Номер индекса",
+NVL(t2.index_name, 'Индексов в таблице нет') as "Имя индекса",
+CASE WHEN LOWER(t2.uniqueness) = 'unique' THEN 'Уникальный'
+WHEN LOWER(t2.uniqueness) = 'nonunique' THEN 'Неуникальный'
+ELSE '-' END AS "Вид индекса",
+NVL(t2.cols, '-') as "Имена столбцов",
+NVL(TO_CHAR(t2.col_number), '-') as "Кол-во столбцов в индексе",
+CASE WHEN ind_num = 1 THEN 
+        (SELECT COUNT(*) FROM ind_cols WHERE table_name = t1.table_name AND LOWER(uniqueness) = 'unique') || '/' ||
+    	(SELECT COUNT(*) FROM ind_cols WHERE table_name = t1.table_name AND LOWER(uniqueness) = 'nonunique')
+	ELSE ' ' END as "Кол-во индексов (уник/неуник)"
+FROM alltables t1 LEFT OUTER JOIN ind_cols t2 ON (t1.table_name = t2.table_name)
+ORDER By t1.tab_num)
+
+SELECT * FROM res
+UNION ALL
+SELECT 'Итого:' as "Номер таблицы", ' ', TO_CHAR((SELECT COUNT(*) FROM res WHERE "Имя индекса" <> 'Индексов в таблице нет')),
+' ', ' ', ' ', ' ',
+(SELECT COUNT(*) FROM ind_cols WHERE LOWER(uniqueness) = 'unique') || '/' ||
+(SELECT COUNT(*) FROM ind_cols WHERE LOWER(uniqueness) = 'nonunique') FROM dual;

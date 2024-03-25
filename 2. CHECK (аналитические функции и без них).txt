@@ -1,0 +1,159 @@
+/*Ограничения CHECK с аналитическими функциями*/
+
+/*информация, необходимая для 1-го, 2-го и 4-го столбцов находится в представлении user_constraints;
+необходимо извлечь эту информацию из представления и дополнить её именами столбцов, входящих в каждое ограничение;
+эти имена можно извлечь из предсталвения user_cons_columns*/
+WITH info_cons AS (
+     SELECT c1.table_name, constraint_name, c2.column_name, c1.search_condition, 
+    
+     /*пронумеруем столбцы внутри каждого ограничения*/
+     ROW_NUMBER() OVER (PARTITION BY constraint_name ORDER BY column_name) AS cnum
+     
+     /*с помощью левого внешнего соединения дополним представление user_constraints 
+     информацией о столбцах, входящих в ограничения, из представления user_cons_name*/
+     FROM user_constraints c1  LEFT OUTER JOIN user_cons_columns c2 USING (constraint_name)
+     /*причем необходимо отобрать информацию только об ограничениях типа CHECK; 
+     эта информация расположена в столбце constraint_type в представлении user_constraints*/
+     WHERE c1.constraint_type = 'C'
+     ORDER BY c1.table_name
+),
+info_cons2 AS (
+SELECT table_name, constraint_name AS "Имя ограничения", 
+/*с помощью функции SYS_CONNECT_BY_PATH разделим все дочерние узлы (column_name) родительского узла (constraint_name) 
+запятой с пробелом для отображения списка столбцов ограничения в одной строке, 
+последнюю комбинацию запятой и пробела удалим с помощью функции LTRIM*/
+LTRIM(SYS_CONNECT_BY_PATH(column_name,', '),', ') AS "Столбцы,входящие в ограничение", 
+search_condition AS "Ограничение CHECK", 
+/*пронумеруем строки, относящиеся к каждой таблице;
+в дальнейшем эта нумерация будет использоваться в разделе ORDER BY, 
+а также для устранения повторяющейся информации об имени таблицы*/
+ROW_NUMBER() OVER (PARTITION BY table_name ORDER BY constraint_name) AS tnum, 
+cnum
+FROM info_cons
+
+/*из результата построения иерархического запроса с помощью условия CONNECT_BY_ISLEAF=1
+будет выбрана только та строка, которая является листом (т. е. последним столбцом, входящим в ограничение)*/
+WHERE CONNECT_BY_ISLEAF=1
+/*построение иерархического запроса*/
+START WITH cnum=1
+/*для следующего элемента иерархии должны совпадать имя ограничения, а также номер столбца cnum должен увеличиваться на 1*/
+CONNECT BY PRIOR constraint_name = constraint_name AND PRIOR cnum = cnum-1
+ORDER BY table_name, tnum)
+
+SELECT CASE WHEN tnum = 1 THEN table_name ELSE ' ' END AS "Имя таблицы", "Имя ограничения", "Столбцы,входящие в ограничение", 
+"Ограничение CHECK"
+FROM info_cons2;
+
+
+
+/*Ограничения CHECK без аналитических функций*/
+WITH cons AS (
+    SELECT t1.table_name, t1.constraint_name, t2.column_name, t1.search_condition
+    FROM user_constraints t1 LEFT OUTER JOIN user_cons_columns t2 ON (t1.constraint_name = t2.constraint_name)
+    WHERE t1.constraint_type = 'C'
+),
+cols_number AS(
+    SELECT L.table_name, L.constraint_name, L.column_name, COUNT(R.column_name) + 1 AS col_num
+    FROM cons L LEFT OUTER JOIN cons R ON
+    L.table_name = R.table_name AND L.constraint_name = R.constraint_name 
+    AND
+    L.column_name < R.column_name
+    GROUP BY L.table_name, L.constraint_name, L.column_name
+    ORDER BY 1, 3 DESC
+),
+cons_number AS(
+    SELECT L.table_name, L.constraint_name, COUNT(R.constraint_name) + 1 AS cons_num
+    FROM cons L LEFT OUTER JOIN cons R ON
+    L.table_name = R.table_name 
+    AND
+    L.constraint_name < R.constraint_name 
+    GROUP BY L.table_name, L.constraint_name
+    ORDER BY 1 
+),
+listed AS (
+    SELECT ROWNUM as i, t1.table_name, t3.cons_num, t1.constraint_name, 
+    LTRIM(SYS_CONNECT_BY_PATH(t1.column_name, ', '), ', ') as cols,
+    t1.search_condition, t2.col_num
+    FROM cons t1 LEFT OUTER JOIN cols_number t2 ON
+    (t1.table_name = t2.table_name AND t1.constraint_name = t2.constraint_name AND t1.column_name = t2.column_name) 
+    LEFT OUTER JOIN cons_number t3 ON (t1.table_name = t3.table_name AND t1.constraint_name = t3.constraint_name) 
+    WHERE CONNECT_BY_ISLEAF = 1
+    START WITH t2.col_num = 1
+    CONNECT BY PRIOR t1.table_name = t1.table_name AND PRIOR t1.constraint_name = t1.constraint_name AND PRIOR t2.col_num = t2.col_num -1 
+    ORDER BY 1, 3 
+)
+
+SELECT CASE cons_num WHEN 1 THEN table_name ELSE ' ' END AS "Имя таблицы",
+constraint_name as "Имя ограничения", cols as "Столбцы,входящие в ограничение", search_condition as "Ограничение CHECK"
+FROM listed
+ORDER BY table_name, cons_num;
+
+/*Ограничения CHECK с аналитическими функциями*/
+with tmp1 as
+    (select
+        l.table_name,
+        l.constraint_name,
+        r.column_name,
+        l.search_condition
+    from
+        (select
+            table_name,
+            constraint_name,
+            search_condition
+        from
+            user_constraints
+        where
+            constraint_type = 'C') l       
+    left outer join        
+        (select
+            table_name,
+            constraint_name,
+            column_name
+        from
+            user_cons_columns) r
+    on
+        l.table_name = r.table_name
+    and
+        l.constraint_name = r.constraint_name),
+        
+tmp2 as
+    (select
+        table_name,
+        constraint_name,
+        column_name,
+        search_condition,
+        count(*) over(partition by table_name, constraint_name order by column_name) as gr_cur_num,
+        count(*) over(partition by table_name, constraint_name) as gr_tot_num        
+    from
+        tmp1),
+        
+tmp3 as
+    (select 
+        rownum num,
+        table_name,
+        constraint_name,
+        regexp_replace(sys_connect_by_path(column_name, ','), '^,') as columns,
+        search_condition,
+        gr_cur_num,
+        gr_tot_num,
+        count(*) over(partition by table_name order by constraint_name) as tab_cur_num
+    from
+        tmp2
+    where
+        gr_cur_num = gr_tot_num
+    start with
+        gr_cur_num = 1
+    connect by
+        table_name = prior table_name
+    and
+        constraint_name = prior constraint_name
+    and
+        prior gr_cur_num + 1 = gr_cur_num)
+    
+select  
+    case when tab_cur_num = 1 then table_name else ' ' end as "Имя таблицы",
+    constraint_name as "Имя ограничения",
+    columns as "Столбцы,входящие в ограничение",
+    search_condition as "Ограничение CHECK"
+from
+    tmp3;
